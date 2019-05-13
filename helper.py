@@ -7,6 +7,7 @@ from settings import *
 from anti_block import *
 
 import json
+import datetime
 import time
 import random
 import logging
@@ -17,10 +18,15 @@ YANDEX_URL = 'https://realty.yandex.ru/moskva/snyat/kvartira/studiya,1,2,3,4-i-b
 
 class MongoDB:
     def __init__(self):
-        self.db = pymongo.MongoClient(f'mongodb://{MONGO_USER}:{MONGO_PASS}@{MONGO_HOST}/{MONGO_DB}?connectTimeoutMS={MONGO_TIMEOUT}')[MONGO_DB]
+        try:
+            self.db = pymongo.MongoClient(f'mongodb://{MONGO_USER}:{MONGO_PASS}@{MONGO_HOST}/{MONGO_DB}?connectTimeoutMS={MONGO_TIMEOUT}')[MONGO_DB]
+            self.db.command('ismaster')
+        except pymongo.errors.ServerSelectionTimeoutError:
+            print("Something went wrong with MongoDB.")
+            raise
 
     def exists(self, data):
-        return self.db.get_collection(MONGO_FLATS).count_documents(data) == 0
+        return self.db.get_collection(MONGO_FLATS).count_documents(data) != 0
 
     def collection(self, db_name):
         return self.db.get_collection(db_name)
@@ -29,6 +35,26 @@ class MongoDB:
 class Parser:
     def __init__(self, db):
         self.db = db
+
+    def update_or_do_nothing(self, data):
+        document = list(self.db.collection(MONGO_FLATS).find({'url': data['url']}))[0]
+
+        updated_fields = {}
+        for key, value in document.items():
+            if key in ['updated_at', 'created_at', 'updated_fields', '_id', 'processed']:
+                continue
+
+            if value != data[key]:
+                updated_fields.update({key: data[value]})
+
+        if len(updated_fields) != 0:
+            updated_fields['updated_fields'] = updated_fields
+            updated_fields['updated_at'] = data['updated_at']
+            self.db.collection(MONGO_FLATS).find_one_and_update(
+                {'url': data['url']},
+                {'$set': updated_fields},
+                upsert=False,
+            )
 
     def parse_yandex(self, soup):
         """
@@ -56,6 +82,9 @@ class Parser:
                 'prepayment': int(flat.get('prepayment', 0) / 100 * flat.get('price', {}).get('value', 0)),
                 'images': flat.get('fullImages', []),
                 'planImages': flat.get('extImages', {}).get('IMAGE_PLAN', {}).get('fullImages', []),
+                'created_at': datetime.datetime.fromtimestamp(time.time()).ctime(),
+                'updated_at': datetime.datetime.fromtimestamp(time.time()).ctime(),
+                'updated_fields': [],
             }
 
             if current_data['url'] == 'shrug':
@@ -67,8 +96,8 @@ class Parser:
             for image in current_data['planImages']:
                 current_data['images'].remove(image)
 
-            if self.db.exists(current_data):
-                self.db.collection(MONGO_FLATS).insert_one(current_data)
+            if not self.db.exists({'url': current_data['url']}):
+                update_or_do_nothing(current_data)
 
 
 def configure_settings(db):
@@ -123,7 +152,7 @@ def main():
 
         try:
             # create request
-            state = session.get(YANDEX_URL, headers=HEADERS, proxies={'https': proxy}, timeout=5)
+            state = session.get(YANDEX_URL, headers=HEADERS, proxies={'https': proxy}, timeout=7)
 
             # create soup for the caught state
             soup = BeautifulSoup(state.text.encode(state.encoding).decode('utf-8'), 'html.parser')

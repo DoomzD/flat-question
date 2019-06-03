@@ -48,9 +48,11 @@ class Parser:
                 updated_fields.update({key: data[value]})
 
         if len(updated_fields) != 0:
-            updated_fields['updated_fields'] = updated_fields
+            document['updated_fields'].append(updated_fields)
+            updated_fields['updated_fields'] = document['updated_fields']
             updated_fields['updated_at'] = data['updated_at']
-            self.db.collection(MONGO_FLATS).find_one_and_update(
+
+            self.db.collection(MONGO_FLATS).update_one(
                 {'url': data['url']},
                 {'$set': updated_fields},
                 upsert=False,
